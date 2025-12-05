@@ -154,25 +154,35 @@ def decode_base64(data: str) -> str:
 
 def parse_subscription(content: str) -> list[str]:
     """Парсит подписку (поддерживает разделение через \\n, пробелы, или смешанное)"""
+    import re
+    
+    original_len = len(content)
+    
+    # Пробуем декодировать base64
     decoded = decode_base64(content.strip())
-    if decoded:
+    if decoded and any(p in decoded for p in ['vless://', 'vmess://', 'ss://', 'trojan://']):
         content = decoded
     
     protocols = ['vless://', 'vmess://', 'ss://', 'trojan://', 
                  'hysteria2://', 'hy2://', 'hysteria://', 'tuic://']
     
+    # Ищем ключи напрямую через regex (более надёжно)
     keys = []
-    
-    # Заменяем пробелы перед протоколами на переносы строк
-    import re
     for proto in protocols:
-        content = re.sub(r'\s+(' + re.escape(proto) + ')', r'\n\1', content)
+        # Находим все вхождения протокола до следующего протокола или конца
+        pattern = re.escape(proto) + r'[^\s]+' 
+        matches = re.findall(pattern, content)
+        keys.extend(matches)
     
-    for line in content.split('\n'):
-        line = line.strip()
-        if any(line.startswith(p) for p in protocols):
-            keys.append(line)
-    return keys
+    # Убираем дубликаты сохраняя порядок
+    seen = set()
+    unique_keys = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            unique_keys.append(k)
+    
+    return unique_keys
 
 
 def get_key_name(key: str) -> str:
