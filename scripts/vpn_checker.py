@@ -153,7 +153,7 @@ def decode_base64(data: str) -> str:
 
 
 def parse_subscription(content: str) -> list[str]:
-    """Парсит подписку"""
+    """Парсит подписку (поддерживает разделение через \\n, пробелы, или смешанное)"""
     decoded = decode_base64(content.strip())
     if decoded:
         content = decoded
@@ -162,6 +162,12 @@ def parse_subscription(content: str) -> list[str]:
                  'hysteria2://', 'hy2://', 'hysteria://', 'tuic://']
     
     keys = []
+    
+    # Заменяем пробелы перед протоколами на переносы строк
+    import re
+    for proto in protocols:
+        content = re.sub(r'\s+(' + re.escape(proto) + ')', r'\n\1', content)
+    
     for line in content.split('\n'):
         line = line.strip()
         if any(line.startswith(p) for p in protocols):
