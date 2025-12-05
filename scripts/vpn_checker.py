@@ -55,7 +55,30 @@ class CheckResult:
     speed_kbps: float = 0
     exit_ip: str = ""
     exit_country: str = ""
+    country_code: str = ""
+    isp: str = ""
     error: str = ""
+
+
+# Флаги стран
+COUNTRY_FLAGS = {
+    "RU": "🇷🇺", "DE": "🇩🇪", "NL": "🇳🇱", "US": "🇺🇸", "GB": "🇬🇧",
+    "FR": "🇫🇷", "FI": "🇫🇮", "SE": "🇸🇪", "NO": "🇳🇴", "PL": "🇵🇱",
+    "UA": "🇺🇦", "KZ": "🇰🇿", "BY": "🇧🇾", "LT": "🇱🇹", "LV": "🇱🇻",
+    "EE": "🇪🇪", "CZ": "🇨🇿", "AT": "🇦🇹", "CH": "🇨🇭", "IT": "🇮🇹",
+    "ES": "🇪🇸", "PT": "🇵🇹", "GR": "🇬🇷", "TR": "🇹🇷", "IL": "🇮🇱",
+    "AE": "🇦🇪", "SG": "🇸🇬", "JP": "🇯🇵", "KR": "🇰🇷", "HK": "🇭🇰",
+    "TW": "🇹🇼", "AU": "🇦🇺", "CA": "🇨🇦", "BR": "🇧🇷", "IN": "🇮🇳",
+    "AM": "🇦🇲", "GE": "🇬🇪", "MD": "🇲🇩", "RO": "🇷🇴", "BG": "🇧🇬",
+    "HU": "🇭🇺", "SK": "🇸🇰", "RS": "🇷🇸", "HR": "🇭🇷", "SI": "🇸🇮",
+    "IE": "🇮🇪", "BE": "🇧🇪", "LU": "🇱🇺", "DK": "🇩🇰", "IS": "🇮🇸",
+}
+
+# Приоритет сортировки стран (меньше = выше)
+COUNTRY_PRIORITY = {
+    "RU": 0, "DE": 1, "NL": 2, "FI": 3, "SE": 4, "PL": 5,
+    "FR": 6, "GB": 7, "US": 8, "KZ": 9, "BY": 10,
+}
 
 
 def decode_base64(data: str) -> str:
@@ -99,6 +122,30 @@ def get_key_name(key: str) -> str:
         return f"{parsed.hostname}:{parsed.port}"[:35]
     except:
         return key[:35]
+
+
+async def get_ip_info(session: aiohttp.ClientSession, ip: str) -> Tuple[str, str, str]:
+    """Получает информацию об IP: страна, код страны, провайдер"""
+    try:
+        # Используем ip-api.com (бесплатный, без ключа)
+        async with session.get(
+            f"http://ip-api.com/json/{ip}?fields=country,countryCode,isp,org",
+            ssl=False
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                country = data.get('country', 'Unknown')
+                code = data.get('countryCode', 'XX')
+                isp = data.get('isp', '') or data.get('org', 'Unknown')
+                # Сокращаем название провайдера
+                isp = isp.replace('LLC', '').replace('Ltd', '').replace('Limited', '')
+                isp = isp.replace('Corporation', '').replace('Inc.', '').strip()
+                if len(isp) > 25:
+                    isp = isp[:22] + "..."
+                return country, code, isp
+    except:
+        pass
+    return "Unknown", "XX", "Unknown"
 
 
 def get_host_port(key: str) -> Optional[Tuple[str, int]]:
@@ -513,7 +560,13 @@ async def check_key_full(
                 result.exit_ip = exit_ip
                 
                 if ip_changed:
-                    print(f"  ✓ IP: {exit_ip}", flush=True)
+                    # Получаем информацию о стране и провайдере
+                    country, code, isp = await get_ip_info(session, exit_ip)
+                    result.exit_country = country
+                    result.country_code = code
+                    result.isp = isp
+                    flag = COUNTRY_FLAGS.get(code, "🌍")
+                    print(f"  ✓ IP: {exit_ip} | {flag} {country} | {isp}", flush=True)
                 else:
                     print(f"  ⚠ IP: не изменился (возможно прозрачный прокси)", flush=True)
                 
@@ -657,13 +710,20 @@ async def main():
     print(f"\n★ РАБОЧИХ КЛЮЧЕЙ: {len(working)}")
     
     if working:
-        # Топ-5 по скорости
+        # Сортируем по странам (Россия первая) и пингу
+        def sort_key(r):
+            priority = COUNTRY_PRIORITY.get(r.country_code, 99)
+            return (priority, r.latency_ms, -r.speed_kbps)
+        
+        working.sort(key=sort_key)
+        
+        # Топ-5 по качеству
         print(f"\nТоп-5 по качеству:")
         for i, r in enumerate(working[:5], 1):
-            name = get_key_name(r.key)
-            print(f"  {i}. {name} | {r.latency_ms}ms | {r.speed_kbps:.1f}KB/s | {r.exit_ip}")
+            flag = COUNTRY_FLAGS.get(r.country_code, "🌍")
+            print(f"  {i}. {flag} {r.exit_country} | {r.latency_ms}ms | {r.speed_kbps:.1f}KB/s | {r.isp}")
         
-        # Сохраняем
+        # === КОНФИГ 1: Оригинальные имена ===
         working_keys = [r.key for r in working]
         
         with open('vpn.txt', 'w') as f:
@@ -673,33 +733,106 @@ async def main():
         with open('vpn_base64.txt', 'w') as f:
             f.write(encoded)
         
-        # Сохраняем детальный отчёт
+        # === КОНФИГ 2: С переименованием (флаг + страна + провайдер) ===
+        renamed_keys = []
+        country_counters = {}
+        
+        for r in working:
+            flag = COUNTRY_FLAGS.get(r.country_code, "🌍")
+            country = r.exit_country or "Unknown"
+            isp = r.isp or "Server"
+            
+            # Счётчик для уникальности
+            key_base = f"{r.country_code}_{isp}"
+            country_counters[key_base] = country_counters.get(key_base, 0) + 1
+            num = country_counters[key_base]
+            
+            # Новое имя: 🇷🇺 Russia | Yandex Cloud #1
+            new_name = f"{flag} {country} | {isp} #{num}"
+            
+            # Заменяем имя в ключе
+            if '#' in r.key:
+                new_key = r.key.rsplit('#', 1)[0] + '#' + new_name
+            else:
+                new_key = r.key + '#' + new_name
+            
+            renamed_keys.append(new_key)
+        
+        with open('vpn_renamed.txt', 'w') as f:
+            f.write('\n'.join(renamed_keys))
+        
+        encoded_renamed = base64.b64encode('\n'.join(renamed_keys).encode()).decode()
+        with open('vpn_renamed_base64.txt', 'w') as f:
+            f.write(encoded_renamed)
+        
+        # === JSON отчёт ===
         report = {
+            "name": "🦊 Bobi VPN",
+            "description": "🔒 Bobi VPN — надёжный и быстрый\n⚡ Проверенные серверы по всему миру",
             "total_checked": len(results),
             "working_count": len(working),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "keys": [
-                {
-                    "name": get_key_name(r.key),
-                    "latency_ms": r.latency_ms,
-                    "speed_kbps": round(r.speed_kbps, 1),
-                    "exit_ip": r.exit_ip,
-                    "key": r.key
-                }
-                for r in working
-            ]
+            "countries": {},
+            "keys": []
         }
         
-        with open('vpn_report.json', 'w') as f:
+        # Группируем по странам
+        for r in working:
+            code = r.country_code or "XX"
+            if code not in report["countries"]:
+                report["countries"][code] = {
+                    "name": r.exit_country,
+                    "flag": COUNTRY_FLAGS.get(code, "🌍"),
+                    "count": 0
+                }
+            report["countries"][code]["count"] += 1
+            
+            report["keys"].append({
+                "name": get_key_name(r.key),
+                "country": r.exit_country,
+                "country_code": r.country_code,
+                "flag": COUNTRY_FLAGS.get(r.country_code, "🌍"),
+                "isp": r.isp,
+                "latency_ms": r.latency_ms,
+                "speed_kbps": round(r.speed_kbps, 1),
+                "exit_ip": r.exit_ip,
+                "key": r.key
+            })
+        
+        with open('vpn_report.json', 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         
-        print(f"\nСохранено:")
-        print(f"  vpn.txt - {len(working)} ключей")
-        print(f"  vpn_base64.txt - base64 формат")
-        print(f"  vpn_report.json - детальный отчёт")
+        # === Happ конфиг ===
+        happ_config = f"""#PROFILE-TITLE: 🦊 Bobi VPN
+#PROFILE-UPDATE-INTERVAL: 6
+#SUBSCRIPTION-USERINFO: upload=0; download=0; total=10737418240; expire=0
+#PROFILE-WEB-PAGE-URL: https://t.me/bobi_vpn
+
+{chr(10).join(renamed_keys)}
+"""
+        with open('bobi_vpn.txt', 'w', encoding='utf-8') as f:
+            f.write(happ_config)
+        
+        encoded_happ = base64.b64encode(happ_config.encode()).decode()
+        with open('bobi_vpn_base64.txt', 'w') as f:
+            f.write(encoded_happ)
+        
+        print(f"\n{'=' * 60}")
+        print("СОХРАНЕНО:")
+        print(f"{'=' * 60}")
+        print(f"  📄 vpn.txt - {len(working)} ключей (оригинал)")
+        print(f"  📄 vpn_renamed.txt - с красивыми именами")
+        print(f"  🦊 bobi_vpn.txt - для Happ (с заголовком)")
+        print(f"  📊 vpn_report.json - детальный отчёт")
+        print(f"\nПо странам:")
+        for code, info in sorted(report["countries"].items(), 
+                                  key=lambda x: COUNTRY_PRIORITY.get(x[0], 99)):
+            print(f"  {info['flag']} {info['name']}: {info['count']} серверов")
     else:
         print("\nРабочих ключей не найдено!")
         with open('vpn.txt', 'w') as f:
+            f.write('')
+        with open('bobi_vpn.txt', 'w') as f:
             f.write('')
 
 
