@@ -156,8 +156,6 @@ def parse_subscription(content: str) -> list[str]:
     """Парсит подписку (поддерживает разделение через \\n, пробелы, или смешанное)"""
     import re
     
-    original_len = len(content)
-    
     # Пробуем декодировать base64
     decoded = decode_base64(content.strip())
     if decoded and any(p in decoded for p in ['vless://', 'vmess://', 'ss://', 'trojan://']):
@@ -166,13 +164,23 @@ def parse_subscription(content: str) -> list[str]:
     protocols = ['vless://', 'vmess://', 'ss://', 'trojan://', 
                  'hysteria2://', 'hy2://', 'hysteria://', 'tuic://']
     
-    # Ищем ключи напрямую через regex (более надёжно)
     keys = []
-    for proto in protocols:
-        # Находим все вхождения протокола до следующего протокола или конца
-        pattern = re.escape(proto) + r'[^\s]+' 
-        matches = re.findall(pattern, content)
-        keys.extend(matches)
+    
+    # Сначала пробуем стандартный парсинг по строкам
+    for line in content.split('\n'):
+        line = line.strip()
+        if any(line.startswith(p) for p in protocols):
+            keys.append(line)
+    
+    # Если нашли мало ключей, но в контенте есть протоколы — используем regex
+    # (для подписок где ключи разделены пробелами)
+    if len(keys) < 10 and any(p in content for p in protocols):
+        keys = []
+        for proto in protocols:
+            # Ищем от протокола до пробела/переноса
+            pattern = re.escape(proto) + r'[^\s\n]+' 
+            matches = re.findall(pattern, content)
+            keys.extend(matches)
     
     # Убираем дубликаты сохраняя порядок
     seen = set()
