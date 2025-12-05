@@ -17,12 +17,13 @@ from urllib.parse import urlparse, unquote, parse_qs
 from typing import Optional, Tuple
 from dataclasses import dataclass
 import aiohttp
+from aiohttp_socks import ProxyConnector
 
 # ============== НАСТРОЙКИ ==============
 TIMEOUT_TCP = 5          # Таймаут TCP пинга
-TIMEOUT_PROXY = 20       # Таймаут проверки через прокси
-STARTUP_DELAY = 2        # Время запуска sing-box
-MAX_CONCURRENT = 8       # Параллельных проверок
+TIMEOUT_PROXY = 25       # Таймаут проверки через прокси
+STARTUP_DELAY = 3        # Время запуска sing-box
+MAX_CONCURRENT = 5       # Параллельных проверок (меньше = стабильнее)
 MAX_LATENCY_MS = 3000    # Максимальный пинг (мс)
 MIN_SPEED_KBPS = 50      # Минимальная скорость (KB/s)
 
@@ -363,23 +364,27 @@ async def check_tcp(host: str, port: int) -> Tuple[bool, int]:
         return False, 0
 
 
-async def check_connectivity(session: aiohttp.ClientSession, proxy: str) -> bool:
+async def check_connectivity(session: aiohttp.ClientSession) -> Tuple[bool, str]:
     """Проверка базового соединения через прокси"""
+    last_error = ""
     for url in CONNECTIVITY_URLS:
         try:
-            async with session.get(url, proxy=proxy, allow_redirects=False) as resp:
+            async with session.get(url, allow_redirects=False, ssl=False) as resp:
                 if resp.status in [200, 204, 301, 302, 403]:
-                    return True
-        except:
-            continue
-    return False
+                    return True, ""
+                last_error = f"status={resp.status}"
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+        except Exception as e:
+            last_error = f"{type(e).__name__}"
+    return False, last_error
 
 
-async def check_ip(session: aiohttp.ClientSession, proxy: str, my_ip: str) -> Tuple[bool, str]:
+async def check_ip(session: aiohttp.ClientSession, my_ip: str) -> Tuple[bool, str]:
     """Проверка смены IP"""
     for url in IP_CHECK_URLS:
         try:
-            async with session.get(url, proxy=proxy) as resp:
+            async with session.get(url, ssl=False) as resp:
                 if resp.status == 200:
                     text = await resp.text()
                     if 'json' in url:
@@ -394,11 +399,11 @@ async def check_ip(session: aiohttp.ClientSession, proxy: str, my_ip: str) -> Tu
     return False, ""
 
 
-async def check_download(session: aiohttp.ClientSession, proxy: str) -> Tuple[bool, float]:
+async def check_download(session: aiohttp.ClientSession) -> Tuple[bool, float]:
     """Проверка скачивания файла + скорость"""
     try:
         start = time.time()
-        async with session.get(TEST_FILE_URL, proxy=proxy) as resp:
+        async with session.get(TEST_FILE_URL, ssl=False) as resp:
             if resp.status == 200:
                 data = await resp.read()
                 elapsed = time.time() - start
@@ -472,34 +477,38 @@ async def check_key_full(
         try:
             process = subprocess.Popen(
                 ['sing-box', 'run', '-c', config_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
             
             await asyncio.sleep(STARTUP_DELAY)
             
             if process.poll() is not None:
-                print(f"  ✗ Sing-box: процесс упал", flush=True)
+                stderr = process.stderr.read().decode() if process.stderr else ""
+                print(f"  ✗ Sing-box: процесс упал ({stderr[:50]})", flush=True)
                 result.error = "singbox_crash"
                 return result
             
-            proxy = f"socks5://127.0.0.1:{port}"
+            proxy_url = f"socks5://127.0.0.1:{port}"
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_PROXY, connect=10)
-            connector = aiohttp.TCPConnector(ssl=False, force_close=True)
+            
+            # Используем ProxyConnector для SOCKS5
+            connector = ProxyConnector.from_url(proxy_url)
             
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 
                 # === ЭТАП 3: Базовое соединение ===
-                if not await check_connectivity(session, proxy):
-                    print(f"  ✗ Proxy: нет соединения", flush=True)
-                    result.error = "no_connectivity"
+                conn_ok, conn_err = await check_connectivity(session)
+                if not conn_ok:
+                    print(f"  ✗ Proxy: нет соединения ({conn_err})", flush=True)
+                    result.error = f"no_connectivity: {conn_err}"
                     return result
                 
                 result.proxy_ok = True
                 print(f"  ✓ Proxy: соединение есть", flush=True)
                 
                 # === ЭТАП 4: IP проверка ===
-                ip_changed, exit_ip = await check_ip(session, proxy, my_ip)
+                ip_changed, exit_ip = await check_ip(session, my_ip)
                 result.ip_changed = ip_changed
                 result.exit_ip = exit_ip
                 
@@ -509,7 +518,7 @@ async def check_key_full(
                     print(f"  ⚠ IP: не изменился (возможно прозрачный прокси)", flush=True)
                 
                 # === ЭТАП 5: Скачивание файла ===
-                download_ok, speed = await check_download(session, proxy)
+                download_ok, speed = await check_download(session)
                 result.download_ok = download_ok
                 result.speed_kbps = speed
                 
