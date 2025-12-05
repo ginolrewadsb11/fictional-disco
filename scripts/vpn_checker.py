@@ -76,8 +76,64 @@ COUNTRY_FLAGS = {
 
 # Приоритет сортировки стран (меньше = выше)
 COUNTRY_PRIORITY = {
-    "RU": 0, "DE": 1, "NL": 2, "FI": 3, "SE": 4, "PL": 5,
-    "FR": 6, "GB": 7, "US": 8, "KZ": 9, "BY": 10,
+    # СНГ
+    "RU": 0,   # Россия
+    "KZ": 1,   # Казахстан
+    "BY": 2,   # Беларусь
+    "UA": 3,   # Украина
+    "AM": 4,   # Армения
+    "GE": 5,   # Грузия
+    "MD": 6,   # Молдова
+    # Европа - основные
+    "DE": 10,  # Германия
+    "NL": 11,  # Нидерланды
+    "FI": 12,  # Финляндия
+    "SE": 13,  # Швеция
+    "NO": 14,  # Норвегия
+    "PL": 15,  # Польша
+    "FR": 16,  # Франция
+    "GB": 17,  # Великобритания
+    # Прибалтика
+    "LT": 20,  # Литва
+    "LV": 21,  # Латвия
+    "EE": 22,  # Эстония
+    # Европа - остальные
+    "AT": 30,  # Австрия
+    "CH": 31,  # Швейцария
+    "BE": 32,  # Бельгия
+    "LU": 33,  # Люксембург
+    "DK": 34,  # Дания
+    "IE": 35,  # Ирландия
+    "CZ": 36,  # Чехия
+    "SK": 37,  # Словакия
+    "HU": 38,  # Венгрия
+    "RO": 39,  # Румыния
+    "BG": 40,  # Болгария
+    "RS": 41,  # Сербия
+    "HR": 42,  # Хорватия
+    "SI": 43,  # Словения
+    "GR": 44,  # Греция
+    "IT": 45,  # Италия
+    "ES": 46,  # Испания
+    "PT": 47,  # Португалия
+    "IS": 48,  # Исландия
+    # Ближний Восток
+    "TR": 50,  # Турция
+    "IL": 51,  # Израиль
+    "AE": 52,  # ОАЭ
+    # Азия
+    "JP": 60,  # Япония
+    "KR": 61,  # Южная Корея
+    "HK": 62,  # Гонконг
+    "TW": 63,  # Тайвань
+    "SG": 64,  # Сингапур
+    "IN": 65,  # Индия
+    # Америка
+    "US": 70,  # США
+    "CA": 71,  # Канада
+    "BR": 72,  # Бразилия
+    # Океания
+    "AU": 80,  # Австралия
 }
 
 
@@ -710,10 +766,11 @@ async def main():
     print(f"\n★ РАБОЧИХ КЛЮЧЕЙ: {len(working)}")
     
     if working:
-        # Сортируем по странам (Россия первая) и пингу
+        # Сортируем по: 1) страна (Россия первая), 2) провайдер, 3) пинг
         def sort_key(r):
-            priority = COUNTRY_PRIORITY.get(r.country_code, 99)
-            return (priority, r.latency_ms, -r.speed_kbps)
+            country_priority = COUNTRY_PRIORITY.get(r.country_code, 99)
+            isp_name = (r.isp or "zzz").lower()  # провайдер по алфавиту
+            return (country_priority, isp_name, r.latency_ms)
         
         working.sort(key=sort_key)
         
@@ -734,21 +791,29 @@ async def main():
             f.write(encoded)
         
         # === КОНФИГ 2: С переименованием (флаг + страна + провайдер) ===
+        # Сначала считаем сколько серверов у каждого провайдера в каждой стране
+        isp_counters = {}
+        
+        for r in working:
+            key_base = f"{r.country_code}_{r.isp or 'Server'}"
+            isp_counters[key_base] = isp_counters.get(key_base, 0) + 1
+        
+        # Теперь генерируем имена с нумерацией
+        isp_current = {}
         renamed_keys = []
-        country_counters = {}
         
         for r in working:
             flag = COUNTRY_FLAGS.get(r.country_code, "🌍")
             country = r.exit_country or "Unknown"
             isp = r.isp or "Server"
             
-            # Счётчик для уникальности
+            # Текущий номер для этого провайдера
             key_base = f"{r.country_code}_{isp}"
-            country_counters[key_base] = country_counters.get(key_base, 0) + 1
-            num = country_counters[key_base]
+            isp_current[key_base] = isp_current.get(key_base, 0) + 1
+            num = isp_current[key_base]
             
-            # Новое имя: 🇷🇺 Russia | Yandex Cloud #1
-            new_name = f"{flag} {country} | {isp} #{num}"
+            # Новое имя: 🇷🇺 Russia | Yandex Cloud 1
+            new_name = f"{flag} {country} | {isp} {num}"
             
             # Заменяем имя в ключе
             if '#' in r.key:
@@ -802,14 +867,15 @@ async def main():
         with open('vpn_report.json', 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         
-        # === Happ конфиг ===
-        happ_config = f"""#PROFILE-TITLE: 🦊 Bobi VPN
-#PROFILE-UPDATE-INTERVAL: 6
-#SUBSCRIPTION-USERINFO: upload=0; download=0; total=10737418240; expire=0
-#PROFILE-WEB-PAGE-URL: https://t.me/bobi_vpn
-
-{chr(10).join(renamed_keys)}
+        # === Happ конфиг (правильный формат) ===
+        happ_header = """#profile-update-interval: 1
+#profile-title: Bobi VPN💎
+#subscription-userinfo: upload=0; download=0; total=107374182400; expire=1767225600
+#support-url: https://t.me/bobi_vpn
+#profile-web-page-url: https://t.me/bobi_vpn
 """
+        happ_config = happ_header + "\n" + "\n".join(renamed_keys)
+        
         with open('bobi_vpn.txt', 'w', encoding='utf-8') as f:
             f.write(happ_config)
         
